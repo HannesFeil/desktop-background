@@ -35,7 +35,7 @@
             wayland
           ];
 
-          LD_LIBRARY_PATH = "${lib.makeLibraryPath buildInputs}";
+          libPath = "${lib.makeLibraryPath buildInputs}";
         };
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rust;
@@ -49,7 +49,15 @@
             pkgs.libiconv
           ];
 
-          inherit (commons) LD_LIBRARY_PATH;
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+          ];
+
+          postInstall = ''
+            wrapProgram "$out/bin/desktop-background" --prefix LD_LIBRARY_PATH : "${commons.libPath}"
+          '';
+
+          LD_LIBRARY_PATH = commons.libPath;
           # Additional environment variables can be set directly
           # MY_CUSTOM_VAR = "some value";
         };
@@ -72,7 +80,7 @@
           # Inherid inputs from crate buildInputs
           inputsFrom = [ desktop-background ];
 
-          inherit (commons) LD_LIBRARY_PATH;
+          LD_LIBRARY_PATH = commons.libPath;
 
           # Additional dev-shell environment variables can be set directly
           # MY_CUSTOM_DEVELOPMENT_VAR = "something else";
