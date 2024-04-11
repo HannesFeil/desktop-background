@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use anyhow::bail;
@@ -69,7 +70,12 @@ enum Background {
 }
 
 impl Background {
-    pub fn into_renderer(self, width: u32, height: u32) -> anyhow::Result<BackgroundRenderer> {
+    pub fn into_renderer(
+        self,
+        pixels: &mut Pixels,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<BackgroundRenderer> {
         match self {
             Background::StaticImage { path } => {
                 let image = image::imageops::resize(
@@ -78,7 +84,8 @@ impl Background {
                     height,
                     image::imageops::FilterType::Triangle,
                 );
-                Ok(BackgroundRenderer::StaticImage { image })
+                pixels.frame_mut().copy_from_slice(&image);
+                Ok(BackgroundRenderer::StaticImage)
             }
             Background::ClockImage {
                 dir,
@@ -132,9 +139,7 @@ impl Background {
 }
 
 enum BackgroundRenderer {
-    StaticImage {
-        image: RgbaImage,
-    },
+    StaticImage,
     ClockImage {
         dir: PathBuf,
         file_template: String,
@@ -148,9 +153,7 @@ enum BackgroundRenderer {
 impl BackgroundRenderer {
     pub fn render(&mut self, pixels: &mut Pixels, width: u32, height: u32) -> anyhow::Result<()> {
         match self {
-            BackgroundRenderer::StaticImage { image } => {
-                pixels.frame_mut().copy_from_slice(image);
-            }
+            BackgroundRenderer::StaticImage => {}
             BackgroundRenderer::ClockImage {
                 dir,
                 file_template,
@@ -172,40 +175,41 @@ impl BackgroundRenderer {
 
                     let image =
                         load_clock_image(dir, file_template, current_millis, width, height)?;
+
                     buffered_images.push_front((current_millis, image));
-                }
 
-                let color = if *rainbow {
-                    Some(
-                        *Hsv::<f32, Srgb>::new(
-                            Deg(current_millis as f32 / MILLIS_TOTAL as f32 * 360.0),
-                            1.0,
-                            1.0,
+                    let color = if *rainbow {
+                        Some(
+                            *Hsv::<f32, Srgb>::new(
+                                Deg(current_millis as f32 / MILLIS_TOTAL as f32 * 360.0),
+                                1.0,
+                                1.0,
+                            )
+                            .to_rgb::<f32>()
+                            .as_ref(),
                         )
-                        .to_rgb::<f32>()
-                        .as_ref(),
-                    )
-                } else {
-                    color.map(|c| c)
-                };
+                    } else {
+                        color.map(|c| c)
+                    };
 
-                if let Some(color) = color {
-                    pixels
-                        .frame_mut()
-                        .iter_mut()
-                        .zip(buffered_images.back().unwrap().1.iter())
-                        .enumerate()
-                        .for_each(|(idx, (dst, src))| {
-                            if (idx + 1) % 4 == 0 {
-                                *dst = 255;
-                            } else {
-                                *dst = (*src as f32 * color[idx % 4]) as u8;
-                            }
-                        });
-                } else {
-                    pixels
-                        .frame_mut()
-                        .copy_from_slice(&buffered_images.back().unwrap().1)
+                    if let Some(color) = color {
+                        pixels
+                            .frame_mut()
+                            .iter_mut()
+                            .zip(buffered_images.back().unwrap().1.iter())
+                            .enumerate()
+                            .for_each(|(idx, (dst, src))| {
+                                if (idx + 1) % 4 == 0 {
+                                    *dst = 255;
+                                } else {
+                                    *dst = (*src as f32 * color[idx % 4]) as u8;
+                                }
+                            });
+                    } else {
+                        pixels
+                            .frame_mut()
+                            .copy_from_slice(&buffered_images.back().unwrap().1)
+                    }
                 }
             }
         }
@@ -265,24 +269,28 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap();
 
-    let mut renderer = args.background.into_renderer(args.width, args.height)?;
+    let mut renderer = args
+        .background
+        .into_renderer(&mut pixels, args.width, args.height)?;
 
     event_loop
         .run(move |event, elwt| match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::RedrawRequested => {
-                    renderer
-                        .render(&mut pixels, args.width, args.height)
-                        .unwrap_or_else(|e| {
-                            eprintln!("{e}");
-                            elwt.exit();
-                        });
-                    pixels.render().unwrap();
-                    window.request_redraw();
-                }
-                _ => {}
-            },
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => elwt.exit(),
+            Event::AboutToWait => {
+                renderer
+                    .render(&mut pixels, args.width, args.height)
+                    .unwrap_or_else(|e| {
+                        eprintln!("{e}");
+                        elwt.exit();
+                    });
+                pixels.render().unwrap();
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    Instant::now() + Duration::from_millis(50),
+                ));
+            }
             Event::LoopExiting => println!("bye!"),
             _ => {}
         })
