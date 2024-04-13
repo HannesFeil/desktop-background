@@ -162,22 +162,31 @@ impl BackgroundRenderer {
                 rainbow,
                 color,
             } => {
-                let mut current_millis = clock_millis(*clock_step);
-                current_millis = (current_millis + *clock_step * (PRE_BUFFERED_IMAGES as u32 - 1))
-                    % MILLIS_TOTAL;
+                let current_millis = clock_millis(*clock_step);
 
                 assert!(!buffered_images.is_empty());
 
-                if current_millis - buffered_images.front().unwrap().0 >= *clock_step {
-                    if buffered_images.len() >= PRE_BUFFERED_IMAGES {
-                        buffered_images.pop_back();
-                    }
+                let mut redraw = false;
+
+                while buffered_images.back().unwrap().0 < current_millis {
+                    buffered_images.pop_back();
+                }
+
+                while buffered_images.len() < PRE_BUFFERED_IMAGES {
+                    redraw = true;
+
+                    let image_millis = buffered_images
+                        .front()
+                        .map(|t| (t.0 + *clock_step) % MILLIS_TOTAL)
+                        .unwrap_or(current_millis);
 
                     let image =
-                        load_clock_image(dir, file_template, current_millis, width, height)?;
+                        load_clock_image(dir, file_template, image_millis, width, height)?;
 
-                    buffered_images.push_front((current_millis, image));
+                    buffered_images.push_front((image_millis, image));
+                }
 
+                if redraw {
                     let color = if *rainbow {
                         Some(
                             *Hsv::<f32, Srgb>::new(
