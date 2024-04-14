@@ -168,7 +168,7 @@ impl BackgroundRenderer {
 
                 let mut redraw = false;
 
-                while buffered_images.back().unwrap().0 < current_millis {
+                while buffered_images.back().is_some_and(|(time, _)| *time < current_millis) {
                     buffered_images.pop_back();
                 }
 
