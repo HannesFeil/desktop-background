@@ -1,15 +1,17 @@
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
+mod render;
 
 use anyhow::bail;
-use chrono::{Local, Timelike};
 use clap::{Parser, Subcommand};
-use color::{color_space::Srgb, Deg, Hsv, ToRgb};
-use image::RgbaImage;
+use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
 use pixels::{wgpu::RequestAdapterOptions, Pixels, PixelsBuilder, SurfaceTexture};
+use render::BackgroundRenderer;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::VecDeque,
+    io::Write,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoopBuilder,
@@ -17,31 +19,35 @@ use winit::{
     window::WindowBuilder,
 };
 
-const PRE_BUFFERED_IMAGES: usize = 10;
-const MILLIS_PER_SECOND: u32 = 1000;
-const MILLIS_PER_MINUTE: u32 = 60 * MILLIS_PER_SECOND;
-const MILLIS_PER_HOUR: u32 = 60 * MILLIS_PER_MINUTE;
-const MILLIS_TOTAL: u32 = 12 * MILLIS_PER_HOUR;
+const TICK_RATE: u64 = 50;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Desktop resolution width in pixels
+    /// The socket name
     #[arg()]
-    width: u32,
-    /// Desktop resolution height in pixels
-    #[arg()]
-    height: u32,
-    /// Window class name
-    #[arg()]
-    window_class: String,
-    /// Background
+    socket_name: String,
+    /// Command
     #[command(subcommand)]
-    background: Background,
+    command: Command,
 }
 
-#[derive(Debug, Clone, Subcommand)]
-enum Background {
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
+enum Command {
+    /// Start the desktop program
+    Start {
+        /// Desktop resolution width in pixels
+        #[arg()]
+        width: u32,
+        /// Desktop resolution height in pixels
+        #[arg()]
+        height: u32,
+        /// Window class name
+        #[arg()]
+        window_class: String,
+    },
+    /// Close the running desktop program
+    Stop,
     /// A static image background
     StaticImage {
         /// The image file to use
@@ -69,15 +75,15 @@ enum Background {
     },
 }
 
-impl Background {
+impl Command {
     pub fn into_renderer(
         self,
         pixels: &mut Pixels,
         width: u32,
         height: u32,
-    ) -> anyhow::Result<BackgroundRenderer> {
+    ) -> anyhow::Result<render::BackgroundRenderer> {
         match self {
-            Background::StaticImage { path } => {
+            Command::StaticImage { path } => {
                 let image = image::imageops::resize(
                     &image::open(path)?,
                     width,
@@ -85,9 +91,10 @@ impl Background {
                     image::imageops::FilterType::Triangle,
                 );
                 pixels.frame_mut().copy_from_slice(&image);
-                Ok(BackgroundRenderer::StaticImage)
+
+                Ok(BackgroundRenderer::None)
             }
-            Background::ClockImage {
+            Command::ClockImage {
                 dir,
                 file_template,
                 clock_step,
@@ -127,138 +134,57 @@ impl Background {
                     color,
                 })
             }
+            _ => Ok(BackgroundRenderer::None),
         }
     }
-}
-
-enum BackgroundRenderer {
-    StaticImage,
-    ClockImage {
-        dir: PathBuf,
-        file_template: String,
-        clock_step: u32,
-        buffered_images: VecDeque<(u32, RgbaImage)>,
-        rainbow: bool,
-        color: Option<[f32; 3]>,
-    },
-}
-
-impl BackgroundRenderer {
-    pub fn render(&mut self, pixels: &mut Pixels, width: u32, height: u32) -> anyhow::Result<()> {
-        match self {
-            BackgroundRenderer::StaticImage => {}
-            BackgroundRenderer::ClockImage {
-                dir,
-                file_template,
-                clock_step,
-                buffered_images,
-                rainbow,
-                color,
-            } => {
-                let current_millis = clock_millis(*clock_step);
-                let mut redraw = false;
-
-                while buffered_images.back().is_some_and(|(time, _)| *time < current_millis) {
-                    buffered_images.pop_back();
-                }
-
-                while buffered_images.len() < PRE_BUFFERED_IMAGES {
-                    redraw = true;
-
-                    let image_millis = buffered_images
-                        .front()
-                        .map(|t| (t.0 + *clock_step) % MILLIS_TOTAL)
-                        .unwrap_or(current_millis);
-
-                    let image =
-                        load_clock_image(dir, file_template, image_millis, width, height)?;
-
-                    buffered_images.push_front((image_millis, image));
-                }
-
-                if redraw {
-                    let color = if *rainbow {
-                        Some(
-                            *Hsv::<f32, Srgb>::new(
-                                Deg(current_millis as f32 / MILLIS_TOTAL as f32 * 360.0),
-                                1.0,
-                                1.0,
-                            )
-                            .to_rgb::<f32>()
-                            .as_ref(),
-                        )
-                    } else {
-                        color.map(|c| c)
-                    };
-
-                    if let Some(color) = color {
-                        pixels
-                            .frame_mut()
-                            .iter_mut()
-                            .zip(buffered_images.back().unwrap().1.iter())
-                            .enumerate()
-                            .for_each(|(idx, (dst, src))| {
-                                if (idx + 1) % 4 == 0 {
-                                    *dst = 255;
-                                } else {
-                                    *dst = (*src as f32 * color[idx % 4]) as u8;
-                                }
-                            });
-                    } else {
-                        pixels
-                            .frame_mut()
-                            .copy_from_slice(&buffered_images.back().unwrap().1)
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn clock_millis(clock_step: u32) -> u32 {
-    let now = Local::now();
-    let time = now.time();
-    (((time.hour() % 12) * MILLIS_PER_HOUR
-        + time.minute() * MILLIS_PER_MINUTE
-        + time.second() * MILLIS_PER_SECOND
-        + now.timestamp_subsec_millis())
-        / clock_step)
-        * clock_step
-}
-
-fn load_clock_image(
-    dir: &Path,
-    file_template: &str,
-    millis: u32,
-    width: u32,
-    height: u32,
-) -> anyhow::Result<RgbaImage> {
-    let mut path = dir.to_path_buf();
-    path.push(format!(
-        "{hour}/{file}",
-        hour = millis / MILLIS_PER_HOUR,
-        file = file_template.replace("%m", &format!("{millis:08}")),
-    ));
-    Ok(image::imageops::resize(
-        &image::open(path)?,
-        width,
-        height,
-        image::imageops::FilterType::Triangle,
-    ))
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    match args.command {
+        Command::Start {
+            width,
+            height,
+            window_class,
+        } => {
+            let socket = LocalSocketListener::bind(args.socket_name)?;
+            socket.set_nonblocking(true)?;
+
+            run(
+                &window_class,
+                width,
+                height,
+                BackgroundRenderer::None,
+                socket,
+            )?;
+        }
+        command => {
+            let mut socket = LocalSocketStream::connect(args.socket_name)?;
+            bincode::serialize_into(&mut socket, &command)?;
+            socket.flush()?;
+            drop(socket);
+        }
+    }
+
+    Ok(())
+}
+
+fn run(
+    window_class: &str,
+    width: u32,
+    height: u32,
+    mut renderer: BackgroundRenderer,
+    socket: LocalSocketListener,
+) -> anyhow::Result<()> {
     let event_loop = EventLoopBuilder::new().with_wayland().build().unwrap();
     let window = WindowBuilder::new()
-        .with_name(&args.window_class, &args.window_class)
+        .with_name(window_class, window_class)
         .build(&event_loop)
         .unwrap();
 
-    let surface_texture = SurfaceTexture::new(args.width, args.height, &window);
-    let mut pixels = PixelsBuilder::new(args.width, args.height, surface_texture)
+    let surface_texture = SurfaceTexture::new(width, height, &window);
+    let mut pixels = PixelsBuilder::new(width, height, surface_texture)
         .request_adapter_options(RequestAdapterOptions {
             power_preference: pixels::wgpu::PowerPreference::LowPower,
             force_fallback_adapter: false,
@@ -268,10 +194,6 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap();
 
-    let mut renderer = args
-        .background
-        .into_renderer(&mut pixels, args.width, args.height)?;
-
     event_loop
         .run(move |event, elwt| match event {
             Event::WindowEvent {
@@ -279,18 +201,47 @@ fn main() -> anyhow::Result<()> {
                 ..
             } => elwt.exit(),
             Event::AboutToWait => {
+                match socket.accept() {
+                    Ok(stream) => {
+                        match bincode::deserialize_from::<_, Command>(stream) {
+                            Ok(Command::Stop) => {
+                                elwt.exit();
+                            }
+                            Ok(command) => {
+                                renderer = command
+                                    .into_renderer(&mut pixels, width, height)
+                                    .unwrap_or_else(|e| {
+                                        eprintln!("{e}");
+                                        elwt.exit();
+                                        BackgroundRenderer::None
+                                    });
+                            }
+                            Err(error) => {
+                                eprintln!("{error}");
+                                elwt.exit();
+                            }
+                        };
+                    }
+                    Err(error) => match error.kind() {
+                        std::io::ErrorKind::WouldBlock => {}
+                        _ => {
+                            eprintln!("{error}");
+                            elwt.exit();
+                        }
+                    },
+                }
+
                 renderer
-                    .render(&mut pixels, args.width, args.height)
+                    .render(&mut pixels, width, height)
                     .unwrap_or_else(|e| {
                         eprintln!("{e}");
                         elwt.exit();
                     });
                 pixels.render().unwrap();
                 elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    Instant::now() + Duration::from_millis(50),
+                    Instant::now() + Duration::from_millis(TICK_RATE),
                 ));
             }
-            Event::LoopExiting => println!("bye!"),
             _ => {}
         })
         .unwrap();
