@@ -118,18 +118,11 @@ impl Background {
                     None => (false, None),
                 };
 
-                let millis = clock_millis(clock_step);
-                let image = load_clock_image(&dir, &file_template, millis, width, height)?;
-                let mut buffered_images = VecDeque::with_capacity(PRE_BUFFERED_IMAGES);
-                for _ in 0..PRE_BUFFERED_IMAGES {
-                    buffered_images.push_front((millis, image.clone()));
-                }
-
                 Ok(BackgroundRenderer::ClockImage {
                     dir,
                     file_template,
                     clock_step,
-                    buffered_images,
+                    buffered_images: VecDeque::new(),
                     rainbow,
                     color,
                 })
@@ -163,9 +156,6 @@ impl BackgroundRenderer {
                 color,
             } => {
                 let current_millis = clock_millis(*clock_step);
-
-                assert!(!buffered_images.is_empty());
-
                 let mut redraw = false;
 
                 while buffered_images.back().is_some_and(|(time, _)| *time < current_millis) {
