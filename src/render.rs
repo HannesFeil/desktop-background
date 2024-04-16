@@ -43,7 +43,7 @@ impl BackgroundRenderer {
 
                 while buffered_images
                     .back()
-                    .is_some_and(|(time, _)| *time.abs_diff(current_millis) >= clock_step)
+                    .is_some_and(|(time, _)| time.abs_diff(current_millis) >= *clock_step)
                 {
                     buffered_images.pop_back();
                 }
