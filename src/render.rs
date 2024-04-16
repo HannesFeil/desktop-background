@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, path::{Path, PathBuf}};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
 use chrono::{Local, Timelike};
 use color::{color_space::Srgb, Deg, Hsv, ToRgb};
@@ -38,7 +41,10 @@ impl BackgroundRenderer {
                 let current_millis = clock_millis(*clock_step);
                 let mut redraw = false;
 
-                while buffered_images.back().is_some_and(|(time, _)| *time < current_millis) {
+                while buffered_images
+                    .back()
+                    .is_some_and(|(time, _)| *time.abs_diff(current_millis) >= clock_step)
+                {
                     buffered_images.pop_back();
                 }
 
@@ -50,8 +56,7 @@ impl BackgroundRenderer {
                         .map(|t| (t.0 + *clock_step) % MILLIS_TOTAL)
                         .unwrap_or(current_millis);
 
-                    let image =
-                        load_clock_image(dir, file_template, image_millis, width, height)?;
+                    let image = load_clock_image(dir, file_template, image_millis, width, height)?;
 
                     buffered_images.push_front((image_millis, image));
                 }
@@ -127,4 +132,3 @@ fn load_clock_image(
         image::imageops::FilterType::Triangle,
     ))
 }
-
