@@ -30,6 +30,7 @@
           buildInputs = [
             libxkbcommon
             libGL
+            vulkan-loader
 
             # WINIT_UNIX_BACKEND=wayland
             wayland
